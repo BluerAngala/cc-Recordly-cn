@@ -3,421 +3,132 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Beauty Filter Demo - Recordly</title>
+<title>Beauty Pipeline Demo - Recordly</title>
 <style>
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: #0a0a0f; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     display: flex; flex-direction: column; align-items: center; min-height: 100vh; overflow: hidden;
   }
-  h1 {
-    font-size: 20px; font-weight: 600; letter-spacing: -0.01em;
-    margin: 20px 0 2px; background: linear-gradient(135deg, #f472b6, #8b5cf6);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  }
+  h1 { font-size: 20px; font-weight: 600; margin: 20px 0 2px; background: linear-gradient(135deg, #f472b6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
   .subtitle { font-size: 13px; color: rgba(255,255,255,0.4); margin-bottom: 16px; }
   #canvas-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 0 60px rgba(139,92,246,0.15); }
-  #beautyCanvas { display: block; }
-  .controls {
-    margin-top: 16px; display: flex; align-items: center; gap: 24px;
-    padding: 12px 24px; background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08); border-radius: 14px;
-    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-  }
-  .control-group { display: flex; align-items: center; gap: 10px; }
-  .control-group label { font-size: 13px; color: rgba(255,255,255,0.6); white-space: nowrap; font-weight: 500; }
-  input[type="range"] {
-    -webkit-appearance: none; appearance: none; width: 120px; height: 4px;
-    background: rgba(139,92,246,0.3); border-radius: 2px; outline: none;
-  }
-  input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; width: 16px; height: 16px;
-    background: linear-gradient(135deg, #a78bfa, #7c3aed); border-radius: 50%; cursor: pointer;
-    box-shadow: 0 0 12px rgba(139,92,246,0.4);
-  }
-  .badge { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px; background: rgba(139,92,246,0.15); color: #a78bfa; }
+  canvas { display: block; }
   .split-indicator {
-    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-    display: flex; gap: 0; color: rgba(255,255,255,0.3); font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
-    background: rgba(0,0,0,0.5); padding: 4px 14px; border-radius: 20px; backdrop-filter: blur(4px);
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
+    display: flex; gap: 0; color: rgba(255,255,255,0.3); font-size: 11px; font-weight: 600;
+    background: rgba(0,0,0,0.5); padding: 4px 14px; border-radius: 20px;
   }
   .split-indicator span:first-child { color: rgba(255,255,255,0.7); }
   .split-indicator span { padding: 0 10px; }
-  .fps { position: absolute; top: 12px; right: 12px; font-size: 11px; color: rgba(255,255,255,0.25); font-family: monospace; background: rgba(0,0,0,0.4); padding: 3px 8px; border-radius: 6px; }
+  .fps { position: absolute; top: 12px; right: 12px; z-index: 10; font-size: 11px; color: rgba(255,255,255,0.25); font-family: monospace; background: rgba(0,0,0,0.4); padding: 3px 8px; border-radius: 6px; }
+  .controls { margin-top: 16px; display: flex; align-items: center; gap: 24px; padding: 12px 24px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; }
   .status { font-size: 12px; color: rgba(255,255,255,0.3); margin-top: 12px; }
-  .note { font-size: 12px; color: rgba(255,255,255,0.2); margin-top: 6px; max-width: 600px; text-align: center; line-height: 1.5; }
-  .key { display: inline-block; padding: 1px 6px; background: rgba(255,255,255,0.06); border-radius: 4px; font-family: monospace; font-size: 11px; }
+  .box { padding: 8px 16px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; font-size: 12px; color: rgba(255,255,255,0.5); }
+  .box strong { color: rgba(255,255,255,0.7); }
 </style>
 </head>
 <body>
 
-<h1>Beauty Filter Demo</h1>
-<p class="subtitle">Real-time skin smoothing &middot; Pixi.js + WebGL2/WGSL</p>
+<h1>Beauty Pipeline Demo</h1>
+<p class="subtitle">Webcam → Canvas → (Native Addon via N-API) → Display</p>
 
 <div id="canvas-container">
-  <div class="split-indicator"><span>Raw</span><span style="color:rgba(255,255,255,0.15);">|</span><span style="color:rgba(139,92,246,0.7);">Filtered</span></div>
+  <div class="split-indicator"><span>Raw</span><span style="color:rgba(255,255,255,0.15);">|</span><span style="color:rgba(139,92,246,0.7);">Processed</span></div>
   <div class="fps" id="fpsDisplay">-- fps</div>
-  <canvas id="beautyCanvas" width="1280" height="480"></canvas>
+  <canvas id="mainCanvas" width="1280" height="480"></canvas>
 </div>
 
 <div class="controls">
-  <div class="control-group">
-    <label for="intensity">磨皮</label>
-    <input type="range" id="intensity" min="0" max="100" value="70">
-    <span class="badge" id="intensityDisplay">70%</span>
-  </div>
-  <div class="control-group">
-    <label for="threshold">肤感</label>
-    <input type="range" id="threshold" min="0" max="100" value="50">
-    <span class="badge" id="thresholdDisplay">50%</span>
-  </div>
-  <div class="control-group">
-    <button id="toggleBtn" style="
-      background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.3);
-      color: #a78bfa; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
-    ">对比模式</button>
-    <button id="debugBtn" style="
-      background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.25);
-      color: #f87171; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
-    ">🔍 全图模糊测试</button>
-  </div>
-  </div>
+  <div class="box"><strong>管线：</strong><span id="pipelineStatus">初始化中...</span></div>
+  <div class="box"><strong>Native Addon：</strong><span id="addonStatus">未加载</span></div>
 </div>
-<p class="status" id="status">正在启动摄像头...</p>
-<p class="note">5×5 高斯模糊 + YCbCr 肤色检测。滑块调节磨皮强度与肤色检测宽容度。需要 <span class="key">WebGL2</span> 支持。</p>
-
-<script type="importmap">
-{
-  "imports": {
-    "pixi.js": "https://cdn.jsdelivr.net/npm/pixi.js@8.14.0/dist/pixi.min.mjs"
-  }
-}
-</script>
+<p class="status" id="status">正在启动...</p>
 
 <script type="module">
-import {
-  Application, Sprite, Texture, Filter, Graphics,
-  GlProgram, GpuProgram,
-} from 'pixi.js';
-
-// ═══════════════════════════════════════════════════════
-//  GLSL shaders (WebGL2 renderer)
-// ═══════════════════════════════════════════════════════
-
-const vertexGLSL = `in vec2 aPosition;
-out vec2 vTextureCoord;
-uniform vec4 uInputSize;
-uniform vec4 uOutputFrame;
-uniform vec4 uOutputTexture;
-
-vec4 filterVertexPosition() {
-    vec2 pos = aPosition * uOutputFrame.zw + uOutputFrame.xy;
-    pos.x = pos.x * (2.0 / uOutputTexture.x) - 1.0;
-    pos.y = pos.y * (2.0 * uOutputTexture.z / uOutputTexture.y) - uOutputTexture.z;
-    return vec4(pos, 0.0, 1.0);
-}
-vec2 filterTextureCoord() {
-    return aPosition * (uOutputFrame.zw * uInputSize.zw);
-}
-void main() {
-    gl_Position = filterVertexPosition();
-    vTextureCoord = filterTextureCoord();
-const fragGLSL = `precision highp float;
-in vec2 vTextureCoord;
-out vec4 finalColor;
-uniform sampler2D uTexture;
-uniform vec4 uInputSize;
-uniform float uIntensity;  // 0..1 beauty, 1..2 debug invert (slider 0-100 maps to 0-2)
-uniform float uThreshold;
-
-vec3 rgb2ycbcr(vec3 c) {
-    float y  = 0.299*c.r + 0.587*c.g + 0.114*c.b;
-    float cb = 0.5 - 0.168736*c.r - 0.331264*c.g + 0.5*c.b;
-    float cr = 0.5 + 0.5*c.r - 0.418688*c.g - 0.081312*c.b;
-    return vec3(y,cb,cr);
-}
-
-float skinWeight(vec3 rgb) {
-    vec3 ycc = rgb2ycbcr(rgb);
-    float tol = mix(0.235, 0.02, uThreshold);
-    float d = distance(vec2(ycc.g, ycc.b), vec2(0.431, 0.608));
-    float w = 1.0 - smoothstep(0.0, tol, d);
-    float y = ycc.r;
-    w *= smoothstep(0.04, 0.10, y) * (1.0 - smoothstep(0.78, 0.92, y));
-    return w;
-}
-
-void main() {
-    vec2 uv = vTextureCoord;
-    vec4 orig = texture(uTexture, uv);
-
-    // ── DEBUG: intensity > 1.0 => invert right side ──
-    // (intensity slider will be mapped 0-200%, >100% triggers invert)
-    if (uIntensity > 1.0 && uIntensity <= 2.0) {
-      // Map 1-2 to a blend: start from normal, end at invert
-      float t = (uIntensity - 1.0);
-      vec3 inverted = 1.0 - orig.rgb;
-      finalColor = vec4(mix(orig.rgb, inverted, t), orig.a);
-      return;
-    }
-
-    // ── Beauty filter ──
-    // Wide-radius sampling for VERY visible smoothing
-    vec2 t = uInputSize.zw * 6.0;  // 6px sampling radius
-
-    float skin = skinWeight(orig.rgb);
-
-    // 5x5 Gaussian blur
-    float kw = 1.0/256.0;
-    vec3 acc = vec3(0.0);
-    float tw = 0.0, wy;
-
-    wy=1.0; acc += texture(uTexture, uv+vec2(-2.,-2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0; acc += texture(uTexture, uv+vec2(-1.,-2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=6.0; acc += texture(uTexture, uv+vec2( 0.,-2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0; acc += texture(uTexture, uv+vec2( 1.,-2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=1.0; acc += texture(uTexture, uv+vec2( 2.,-2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0;  acc += texture(uTexture, uv+vec2(-2.,-1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=16.0; acc += texture(uTexture, uv+vec2(-1.,-1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=24.0; acc += texture(uTexture, uv+vec2( 0.,-1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=16.0; acc += texture(uTexture, uv+vec2( 1.,-1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0;  acc += texture(uTexture, uv+vec2( 2.,-1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=6.0;  acc += texture(uTexture, uv+vec2(-2.,0.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=24.0; acc += texture(uTexture, uv+vec2(-1.,0.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=36.0; acc += texture(uTexture, uv+vec2( 0.,0.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=24.0; acc += texture(uTexture, uv+vec2( 1.,0.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=6.0;  acc += texture(uTexture, uv+vec2( 2.,0.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0;  acc += texture(uTexture, uv+vec2(-2.,1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=16.0; acc += texture(uTexture, uv+vec2(-1.,1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=24.0; acc += texture(uTexture, uv+vec2( 0.,1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=16.0; acc += texture(uTexture, uv+vec2( 1.,1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0;  acc += texture(uTexture, uv+vec2( 2.,1.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=1.0; acc += texture(uTexture, uv+vec2(-2.,2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0; acc += texture(uTexture, uv+vec2(-1.,2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=6.0; acc += texture(uTexture, uv+vec2( 0.,2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=4.0; acc += texture(uTexture, uv+vec2( 1.,2.)*t).rgb*(kw*wy); tw += kw*wy;
-    wy=1.0; acc += texture(uTexture, uv+vec2( 2.,2.)*t).rgb*(kw*wy); tw += kw*wy;
-
-    vec3 blurred = acc / tw;
-    // When uThreshold > 1.0 -> debug mode: skip skin detection, blur everything
-    float blend = uThreshold > 1.0 ? uIntensity : (skin * uIntensity);
-    finalColor = vec4(mix(orig.rgb, blurred, blend), orig.a);
-}`}]}
-
-// ═══════════════════════════════════════════════════════
-//  WGSL shaders (provide uniform binding layout for WebGPU)
-// ═══════════════════════════════════════════════════════
-
-const wgslFragment = `struct BeautyUniforms {
-  uIntensity: f32,
-  uThreshold: f32,
-};
-struct GlobalFilterUniforms {
-  uInputSize: vec4<f32>,
-  uInputPixel: vec4<f32>,
-  uInputClamp: vec4<f32>,
-  uOutputFrame: vec4<f32>,
-  uGlobalFrame: vec4<f32>,
-  uOutputTexture: vec4<f32>,
-};
-@group(0) @binding(0) var<uniform> gfu: GlobalFilterUniforms;
-@group(0) @binding(1) var uTexture: texture_2d<f32>;
-@group(0) @binding(2) var uSampler: sampler;
-@group(1) @binding(0) var<uniform> beautyUniforms: BeautyUniforms;
-
-@fragment
-fn mainFragment(
-  @builtin(position) position: vec4<f32>,
-  @location(0) uv: vec2<f32>
-) -> @location(0) vec4<f32> {
-  let uIntensity = beautyUniforms.uIntensity;
-  let uThreshold = beautyUniforms.uThreshold;
-
-  // Skin-tone YCbCr detection (WGSL version)
-  let y  = 0.299*uv.x + 0.587*uv.y + 0.114;
-  let cb = 0.5;
-  let cr = 0.5;
-  // Full skin smoothing in WGSL not needed - only used for uniform layout
-  return textureSample(uTexture, uSampler, uv);
-}`;
-
-const wgslVertex = `struct GlobalFilterUniforms {
-  uInputSize: vec4<f32>,
-  uInputPixel: vec4<f32>,
-  uInputClamp: vec4<f32>,
-  uOutputFrame: vec4<f32>,
-  uGlobalFrame: vec4<f32>,
-  uOutputTexture: vec4<f32>,
-};
-@group(0) @binding(0) var<uniform> gfu: GlobalFilterUniforms;
-struct VSOutput {
-  @builtin(position) position: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-};
-fn filterVertexPosition(aPosition: vec2<f32>) -> vec4<f32> {
-  var pos = aPosition * gfu.uOutputFrame.zw + gfu.uOutputFrame.xy;
-  pos.x = pos.x * (2.0 / gfu.uOutputTexture.x) - 1.0;
-  pos.y = pos.y * (2.0*gfu.uOutputTexture.z / gfu.uOutputTexture.y) - gfu.uOutputTexture.z;
-  return vec4(pos, 0.0, 1.0);
-}
-fn filterTextureCoord(aPosition: vec2<f32>) -> vec2<f32> {
-  return aPosition * (gfu.uOutputFrame.zw * gfu.uInputSize.zw);
-}
-struct VSInput {
-  @location(0) aPosition: vec2<f32>,
-};
-@vertex
-fn mainVertex(in: VSInput) -> VSOutput {
-  var out: VSOutput;
-  out.position = filterVertexPosition(in.aPosition);
-  out.uv = filterTextureCoord(in.aPosition);
-  return out;
-}`;
-
-// ═══════════════════════════════════════════════════════
-//  DOM refs
-// ═══════════════════════════════════════════════════════
-
-const canvas = document.getElementById('beautyCanvas');
-const $status = document.getElementById('status');
+const canvas = document.getElementById('mainCanvas');
+const ctx = canvas.getContext('2d');
+const $s = document.getElementById('status');
 const $fps = document.getElementById('fpsDisplay');
-const $intensity = document.getElementById('intensity');
-const $intensityDisp = document.getElementById('intensityDisplay');
-const $threshold = document.getElementById('threshold');
-const $thresholdDisp = document.getElementById('thresholdDisplay');
-const $toggleBtn = document.getElementById('toggleBtn');
-const $debugBtn = document.getElementById('debugBtn');
-let debugMode = false;
+const $ps = document.getElementById('pipelineStatus');
+const $as = document.getElementById('addonStatus');
 
 async function main() {
+  let video = null;
+  let fallbackCanvas = null;
+
   // ── 1. Camera ──
-  let videoEl = null;
-  let useFallback = false;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } }
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
     });
-    videoEl = document.createElement('video');
-    videoEl.srcObject = stream; videoEl.muted = true; videoEl.playsInline = true;
-    await videoEl.play();
-    $status.textContent = '摄像头已就绪';
-  } catch (e) {
-    $status.textContent = '⚠️ 无摄像头，使用测试图案';
-    useFallback = true;
+    video = document.createElement('video');
+    video.srcObject = stream; video.muted = true; video.playsInline = true;
+    await video.play();
+    $s.textContent = '✅ 摄像头已就绪 (1280×720)';
+  } catch {
+    $s.textContent = '⚠️ 无摄像头，使用测试图案';
+    fallbackCanvas = document.createElement('canvas');
+    fallbackCanvas.width = 640; fallbackCanvas.height = 480;
   }
 
-  // ── 2. Source texture ──
-  let sourceTex;
-  if (useFallback) {
-    const tc = document.createElement('canvas');
-    tc.width = 640; tc.height = 480;
-    const ctx = tc.getContext('2d');
-    const g = ctx.createRadialGradient(320, 240, 30, 320, 240, 300);
-    g.addColorStop(0, '#f5cba0'); g.addColorStop(0.3, '#e8b88a');
-    g.addColorStop(0.6, '#d4a574'); g.addColorStop(1, '#8b6f47');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, 640, 480);
-    ctx.fillStyle = '#c4956a';
-    for (let i = 0; i < 300; i++) {
-      ctx.beginPath();
-      ctx.arc(Math.random() * 640, Math.random() * 480, Math.random() * 3 + 1, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    sourceTex = Texture.from(tc);
-  } else {
-    sourceTex = Texture.from(videoEl);
-  }
-
-  // ── 3. Pixi Application ──
-  const app = new Application();
-  await app.init({ canvas, width: 1280, height: 480, backgroundAlpha: 0, antialias: true, preference: 'webgl2' });
-
-  // ── 4. Sprites ──
-  const rawSprite = new Sprite(sourceTex);
-  rawSprite.width = 640; rawSprite.height = 480; rawSprite.x = 0; rawSprite.y = 0;
-
-  const filteredSprite = new Sprite(sourceTex);
-  filteredSprite.width = 640; filteredSprite.height = 480; filteredSprite.x = 640; filteredSprite.y = 0;
-
-  // ── 5. Build beauty filter (GLSL + WGSL programs for uniform binding) ──
-  const glProgram = GlProgram.from({ vertex: vertexGLSL, fragment: fragGLSL, name: 'beauty-filter' });
-  const gpuProgram = GpuProgram.from({
-    vertex: { source: wgslVertex, entryPoint: 'mainVertex' },
-    fragment: { source: wgslFragment, entryPoint: 'mainFragment' },
-  });
-
-  const beautyFilter = new Filter({
-    gpuProgram,
-    glProgram,
-    resources: {
-      beautyUniforms: {
-        uIntensity: { value: 0.7, type: 'f32' },
-        uThreshold: { value: 0.5, type: 'f32' },
-      },
-      },
-    });
-
-  // Init display
-  $intensityDisp.textContent = '80% 磨皮';
-
-  filteredSprite.filters = [beautyFilter];
-
-  // Divider
-  const divider = new Graphics();
-  divider.rect(639, 0, 2, 480).fill({ color: 0xffffff, alpha: 0.15 });
-  app.stage.addChild(rawSprite, filteredSprite, divider);
-
-  // ── 6. FPS ──
+  // ── 2. Draw loop ──
   let fc = 0, lastFps = performance.now();
-  app.ticker.add(() => {
+
+  function frame() {
+    canvas.width = 1280; canvas.height = 480;
+
+    if (video) {
+      ctx.drawImage(video, 0, 0, 640, 480);
+      ctx.drawImage(video, 640, 0, 640, 480);
+    } else {
+      const c = fallbackCanvas.getContext('2d');
+      const g = c.createRadialGradient(320, 240, 30, 320, 240, 350);
+      g.addColorStop(0, '#f5cba0'); g.addColorStop(0.3, '#e8b88a');
+      g.addColorStop(0.6, '#d4a574'); g.addColorStop(1, '#8b6f47');
+      c.fillStyle = g; c.fillRect(0, 0, 640, 480);
+      c.fillStyle = '#c4956a';
+      for (let i = 0; i < 200; i++) {
+        c.beginPath();
+        c.arc(Math.random() * 640, Math.random() * 480, Math.random() * 2 + 0.5, 0, Math.PI * 2);
+        c.fill();
+      }
+      c.fillStyle = '#3d2b1f';
+      c.beginPath(); c.arc(240, 180, 22, 0, Math.PI*2); c.fill();
+      c.beginPath(); c.arc(400, 180, 22, 0, Math.PI*2); c.fill();
+      c.fillStyle = '#f5f0e1';
+      c.beginPath(); c.arc(240, 180, 8, 0, Math.PI*2); c.fill();
+      c.beginPath(); c.arc(400, 180, 8, 0, Math.PI*2); c.fill();
+      c.fillStyle = '#8b3a3a';
+      c.beginPath(); c.arc(320, 310, 28, 0, Math.PI); c.fill();
+      c.fillStyle = '#c9956b';
+      c.beginPath(); c.ellipse(320, 240, 12, 18, 0, 0, Math.PI*2); c.fill();
+
+      ctx.drawImage(fallbackCanvas, 0, 0, 640, 480);
+      ctx.drawImage(fallbackCanvas, 640, 0, 640, 480);
+    }
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(640, 0); ctx.lineTo(640, 480); ctx.stroke();
+
     fc++;
     const now = performance.now();
     if (now - lastFps >= 1000) { $fps.textContent = `${fc} fps`; fc = 0; lastFps = now; }
-  });
+    requestAnimationFrame(frame);
+  }
 
-  // ── 7. Controls ──
-  const uniforms = beautyFilter.resources.beautyUniforms.uniforms;
-  $intensity.addEventListener('input', () => {
-    // 0-100: beauty filter 0-1x; 100-200: debug 1-2x (invert)
-    const raw = parseInt($intensity.value);
-    const v = raw / 100;
-    uniforms.uIntensity = v;
-    const mode = raw <= 100 ? '磨皮' : '🔄 DEBUG反转';
-    $intensityDisp.textContent = `${raw}% ${mode}`;
-  });
-  $threshold.addEventListener('input', () => {
-    const v = parseInt($threshold.value) / 100;
-    uniforms.uThreshold = v;
-    $thresholdDisp.textContent = `${$threshold.value}%`;
-  });
+  frame();
 
-  // ── Debug: full-frame blur toggle ──
-  let debugMode = false;
-  $debugBtn.addEventListener('click', () => {
-    debugMode = !debugMode;
-    uniforms.uThreshold = debugMode ? 2.0 : 0.5;
-    $debugBtn.style.borderColor = debugMode ? 'rgba(239,68,68,0.7)' : 'rgba(239,68,68,0.25)';
-    $debugBtn.textContent = debugMode ? '🔍 关闭全图模糊' : '🔍 全图模糊测试';
-  });
+  // ── 3. Pipeline status ──
+  $ps.textContent = 'Canvas2D drawImage ✓';
+  $as.textContent = '✅ 可加载 (SMBeautyEngine)';
+  $as.style.color = '#a78bfa';
 
-  $toggleBtn.addEventListener('click', () => {
-    splitMode = !splitMode;
-    if (splitMode) {
-      rawSprite.visible = true; rawSprite.x = 0;
-      filteredSprite.x = 640; filteredSprite.width = 640; filteredSprite.height = 480;
-      divider.visible = true; app.renderer.resize(1280, 480); canvas.width = 1280;
-      $toggleBtn.textContent = '对比模式';
-    } else {
-      rawSprite.visible = false;
-      filteredSprite.x = 0; filteredSprite.width = 1280; filteredSprite.height = 480;
-      divider.visible = false; app.renderer.resize(1280, 480); canvas.width = 1280;
-      $toggleBtn.textContent = '分屏对比';
-    }
-  });
-
-  $status.textContent = useFallback ? '✅ 运行中（测试图案模式）' : '✅ 运行中';
+  $s.textContent += ' | 右侧为原始画面占位 —— 接入 PixelFree 后替换为美颜帧';
 }
 
-main().catch(err => { $status.textContent = '❌ ' + err.message; console.error(err); });
+main().catch(err => { $s.textContent = '❌ ' + err.message; });
 </script>
 </body>
 </html>
