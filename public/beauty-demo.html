@@ -128,6 +128,7 @@ const fragSrc = `in vec2 vTextureCoord;
 out vec4 finalColor;
 
 uniform sampler2D uTexture;
+uniform vec4 uInputSize;
 uniform float uIntensity;
 uniform float uThreshold;
 
@@ -153,34 +154,41 @@ float skinWeight(vec3 rgb) {
 
 void main() {
     vec2 uv = vTextureCoord;
-    vec2 texel = 1.0 / vec2(textureSize(uTexture, 0));
+    // uInputSize.zw = 1/width, 1/height (provided by Pixi)
+    vec2 texel = uInputSize.zw * 2.0;
 
     vec4 orig = texture(uTexture, uv);
     float skin = skinWeight(orig.rgb);
 
-    // 3x3 Gaussian blur
-    vec3 blurAcc = vec3(0.0);
-    float blurW = 0.0;
-    float k[9];
-    k[0] = 0.0625; k[1] = 0.125; k[2] = 0.0625;
-    k[3] = 0.125;  k[4] = 0.25;  k[5] = 0.125;
-    k[6] = 0.0625; k[7] = 0.125; k[8] = 0.0625;
+    // Manual 3x3 Gaussian blur (no dynamic array indexing)
+    vec3 blurSum = vec3(0.0);
 
-    for (int y = -1; y <= 1; y++) {
-      for (int x = -1; x <= 1; x++) {
-        vec2 off = vec2(float(x), float(y)) * texel * 2.0;
-        vec3 samp = texture(uTexture, uv + off).rgb;
-        int idx = (y+1)*3 + (x+1);
-        float w = k[idx];
-        blurAcc += samp * w;
-        blurW += w;
-      }
-    }
-    vec3 blurred = blurAcc / blurW;
+    // Row -1
+    vec2 t0 = uv + vec2(-1.0, -1.0) * texel;
+    vec2 t1 = uv + vec2( 0.0, -1.0) * texel;
+    vec2 t2 = uv + vec2( 1.0, -1.0) * texel;
+    blurSum += 0.0625 * texture(uTexture, t0).rgb;
+    blurSum += 0.125  * texture(uTexture, t1).rgb;
+    blurSum += 0.0625 * texture(uTexture, t2).rgb;
+
+    // Row 0
+    vec2 m0 = uv + vec2(-1.0,  0.0) * texel;
+    vec2 m1 = uv; // center
+    vec2 m2 = uv + vec2( 1.0,  0.0) * texel;
+    blurSum += 0.125  * texture(uTexture, m0).rgb;
+    blurSum += 0.25   * texture(uTexture, m1).rgb;
+    blurSum += 0.125  * texture(uTexture, m2).rgb;
+
+    // Row +1
+    vec2 b0 = uv + vec2(-1.0,  1.0) * texel;
+    vec2 b1 = uv + vec2( 0.0,  1.0) * texel;
+    vec2 b2 = uv + vec2( 1.0,  1.0) * texel;
+    blurSum += 0.0625 * texture(uTexture, b0).rgb;
+    blurSum += 0.125  * texture(uTexture, b1).rgb;
+    blurSum += 0.0625 * texture(uTexture, b2).rgb;
 
     float blend = skin * uIntensity;
-    vec3 result = mix(orig.rgb, blurred, blend);
-
+    vec3 result = mix(orig.rgb, blurSum, blend);
     finalColor = vec4(result, orig.a);
 }
 `;
