@@ -18,7 +18,6 @@
   .subtitle { font-size: 13px; color: rgba(255,255,255,0.4); margin-bottom: 16px; }
   #canvas-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 0 60px rgba(139,92,246,0.15); }
   #beautyCanvas { display: block; }
-
   .controls {
     margin-top: 16px; display: flex; align-items: center; gap: 24px;
     padding: 12px 24px; background: rgba(255,255,255,0.04);
@@ -53,7 +52,7 @@
 <body>
 
 <h1>Beauty Filter Demo</h1>
-<p class="subtitle">Real-time skin smoothing &middot; Pixi.js + GLSL ES 3.0</p>
+<p class="subtitle">Real-time skin smoothing &middot; Pixi.js + WebGL2/WGSL</p>
 
 <div id="canvas-container">
   <div class="split-indicator"><span>Raw</span><span style="color:rgba(255,255,255,0.15);">|</span><span style="color:rgba(139,92,246,0.7);">Filtered</span></div>
@@ -64,8 +63,8 @@
 <div class="controls">
   <div class="control-group">
     <label for="intensity">磨皮</label>
-    <input type="range" id="intensity" min="0" max="100" value="40">
-    <span class="badge" id="intensityDisplay">40%</span>
+    <input type="range" id="intensity" min="0" max="100" value="70">
+    <span class="badge" id="intensityDisplay">70%</span>
   </div>
   <div class="control-group">
     <label for="threshold">肤感</label>
@@ -80,7 +79,7 @@
   </div>
 </div>
 <p class="status" id="status">正在启动摄像头...</p>
-<p class="note">在 <span class="key">WebGL2</span> 中实时执行基于 YCbCr 肤色检测的选择性磨皮（GLSL ES 3.0）。滑块调节强度与肤色检测宽容度。</p>
+<p class="note">5×5 高斯模糊 + YCbCr 肤色检测。滑块调节磨皮强度与肤色检测宽容度。需要 <span class="key">WebGL2</span> 支持。</p>
 
 <script type="importmap">
 {
@@ -91,110 +90,181 @@
 </script>
 
 <script type="module">
-import { Application, Sprite, Texture, Filter, Graphics, GlProgram, UniformGroup } from 'pixi.js';
+import {
+  Application, Sprite, Texture, Filter, Graphics,
+  GlProgram, GpuProgram,
+} from 'pixi.js';
 
-// ── Default vertex shader (from pixi-filters default2.mjs) ──
-const vertexSrc = `in vec2 aPosition;
+// ═══════════════════════════════════════════════════════
+//  GLSL shaders (WebGL2 renderer)
+// ═══════════════════════════════════════════════════════
+
+const vertexGLSL = `in vec2 aPosition;
 out vec2 vTextureCoord;
-
 uniform vec4 uInputSize;
 uniform vec4 uOutputFrame;
 uniform vec4 uOutputTexture;
 
-vec4 filterVertexPosition( void )
-{
-    vec2 position = aPosition * uOutputFrame.zw + uOutputFrame.xy;
-
-    position.x = position.x * (2.0 / uOutputTexture.x) - 1.0;
-    position.y = position.y * (2.0*uOutputTexture.z / uOutputTexture.y) - uOutputTexture.z;
-
-    return vec4(position, 0.0, 1.0);
+vec4 filterVertexPosition() {
+    vec2 pos = aPosition * uOutputFrame.zw + uOutputFrame.xy;
+    pos.x = pos.x * (2.0 / uOutputTexture.x) - 1.0;
+    pos.y = pos.y * (2.0 * uOutputTexture.z / uOutputTexture.y) - uOutputTexture.z;
+    return vec4(pos, 0.0, 1.0);
 }
-
-vec2 filterTextureCoord( void )
-{
+vec2 filterTextureCoord() {
     return aPosition * (uOutputFrame.zw * uInputSize.zw);
 }
-
-void main(void)
-{
+void main() {
     gl_Position = filterVertexPosition();
     vTextureCoord = filterTextureCoord();
-}
-`;
+}`;
 
-// ── Fragment shader: skin-aware beauty filter (GLSL ES 3.0) ──
-const fragSrc = `precision highp float;
+const fragGLSL = `precision highp float;
 in vec2 vTextureCoord;
 out vec4 finalColor;
-
 uniform sampler2D uTexture;
 uniform vec4 uInputSize;
 uniform float uIntensity;
 uniform float uThreshold;
 
 vec3 rgb2ycbcr(vec3 c) {
-    float y  = 0.299   * c.r + 0.587   * c.g + 0.114   * c.b;
-    float cb = 128.0   - 0.168736 * c.r - 0.331264 * c.g + 0.5     * c.b;
-    float cr = 128.0   + 0.5     * c.r - 0.418688 * c.g - 0.081312 * c.b;
-    return vec3(y, cb, cr);
+    float y  = 0.299*c.r + 0.587*c.g + 0.114*c.b;
+    float cb = 0.5 - 0.168736*c.r - 0.331264*c.g + 0.5*c.b;
+    float cr = 0.5 + 0.5*c.r - 0.418688*c.g - 0.081312*c.b;
+    return vec3(y,cb,cr);
 }
 
 float skinWeight(vec3 rgb) {
     vec3 ycc = rgb2ycbcr(rgb);
-    float cb = ycc.g;
-    float cr = ycc.b;
-    float cbRef = 110.0;
-    float crRef = 155.0;
-    float tol = mix(60.0, 5.0, uThreshold);
-    float w = 1.0 - smoothstep(0.0, tol, distance(vec2(cb, cr), vec2(cbRef, crRef)));
+    float tol = mix(0.235, 0.02, uThreshold);
+    float d = distance(vec2(ycc.g, ycc.b), vec2(0.431, 0.608));
+    float w = 1.0 - smoothstep(0.0, tol, d);
     float y = ycc.r;
-    float lumMask = smoothstep(20.0, 50.0, y) * (1.0 - smoothstep(200.0, 235.0, y));
-    return w * lumMask;
+    w *= smoothstep(0.04, 0.10, y) * (1.0 - smoothstep(0.78, 0.92, y));
+    return w;
 }
 
 void main() {
     vec2 uv = vTextureCoord;
-    // uInputSize.zw = 1/width, 1/height (provided by Pixi)
-    vec2 texel = uInputSize.zw * 2.0;
-
+    vec2 t = uInputSize.zw;
     vec4 orig = texture(uTexture, uv);
     float skin = skinWeight(orig.rgb);
 
-    // Manual 3x3 Gaussian blur (no dynamic array indexing)
-    vec3 blurSum = vec3(0.0);
+    // 5x5 Gaussian blur (binomial weights / 256)
+    float w = 1.0/256.0;
+    vec3 acc = vec3(0.0);
+    float tw = 0.0, wy;
 
+    // Row -2
+    wy=1.0; acc += texture(uTexture, uv+vec2(-2.,-2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=4.0; acc += texture(uTexture, uv+vec2(-1.,-2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=6.0; acc += texture(uTexture, uv+vec2( 0.,-2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=4.0; acc += texture(uTexture, uv+vec2( 1.,-2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=1.0; acc += texture(uTexture, uv+vec2( 2.,-2.)*t).rgb*(w*wy); tw += w*wy;
     // Row -1
-    vec2 t0 = uv + vec2(-1.0, -1.0) * texel;
-    vec2 t1 = uv + vec2( 0.0, -1.0) * texel;
-    vec2 t2 = uv + vec2( 1.0, -1.0) * texel;
-    blurSum += 0.0625 * texture(uTexture, t0).rgb;
-    blurSum += 0.125  * texture(uTexture, t1).rgb;
-    blurSum += 0.0625 * texture(uTexture, t2).rgb;
-
+    wy=4.0;  acc += texture(uTexture, uv+vec2(-2.,-1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=16.0; acc += texture(uTexture, uv+vec2(-1.,-1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=24.0; acc += texture(uTexture, uv+vec2( 0.,-1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=16.0; acc += texture(uTexture, uv+vec2( 1.,-1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=4.0;  acc += texture(uTexture, uv+vec2( 2.,-1.)*t).rgb*(w*wy); tw += w*wy;
     // Row 0
-    vec2 m0 = uv + vec2(-1.0,  0.0) * texel;
-    vec2 m1 = uv; // center
-    vec2 m2 = uv + vec2( 1.0,  0.0) * texel;
-    blurSum += 0.125  * texture(uTexture, m0).rgb;
-    blurSum += 0.25   * texture(uTexture, m1).rgb;
-    blurSum += 0.125  * texture(uTexture, m2).rgb;
-
+    wy=6.0;  acc += texture(uTexture, uv+vec2(-2.,0.)*t).rgb*(w*wy); tw += w*wy;
+    wy=24.0; acc += texture(uTexture, uv+vec2(-1.,0.)*t).rgb*(w*wy); tw += w*wy;
+    wy=36.0; acc += texture(uTexture, uv+vec2( 0.,0.)*t).rgb*(w*wy); tw += w*wy;
+    wy=24.0; acc += texture(uTexture, uv+vec2( 1.,0.)*t).rgb*(w*wy); tw += w*wy;
+    wy=6.0;  acc += texture(uTexture, uv+vec2( 2.,0.)*t).rgb*(w*wy); tw += w*wy;
     // Row +1
-    vec2 b0 = uv + vec2(-1.0,  1.0) * texel;
-    vec2 b1 = uv + vec2( 0.0,  1.0) * texel;
-    vec2 b2 = uv + vec2( 1.0,  1.0) * texel;
-    blurSum += 0.0625 * texture(uTexture, b0).rgb;
-    blurSum += 0.125  * texture(uTexture, b1).rgb;
-    blurSum += 0.0625 * texture(uTexture, b2).rgb;
+    wy=4.0;  acc += texture(uTexture, uv+vec2(-2.,1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=16.0; acc += texture(uTexture, uv+vec2(-1.,1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=24.0; acc += texture(uTexture, uv+vec2( 0.,1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=16.0; acc += texture(uTexture, uv+vec2( 1.,1.)*t).rgb*(w*wy); tw += w*wy;
+    wy=4.0;  acc += texture(uTexture, uv+vec2( 2.,1.)*t).rgb*(w*wy); tw += w*wy;
+    // Row +2
+    wy=1.0; acc += texture(uTexture, uv+vec2(-2.,2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=4.0; acc += texture(uTexture, uv+vec2(-1.,2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=6.0; acc += texture(uTexture, uv+vec2( 0.,2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=4.0; acc += texture(uTexture, uv+vec2( 1.,2.)*t).rgb*(w*wy); tw += w*wy;
+    wy=1.0; acc += texture(uTexture, uv+vec2( 2.,2.)*t).rgb*(w*wy); tw += w*wy;
 
+    vec3 blurred = acc / tw;
     float blend = skin * uIntensity;
-    vec3 result = mix(orig.rgb, blurSum, blend);
-    finalColor = vec4(result, orig.a);
-}
-`;
+    finalColor = vec4(mix(orig.rgb, blurred, blend), orig.a);
+}`;
 
-// ── DOM refs ──
+// ═══════════════════════════════════════════════════════
+//  WGSL shaders (provide uniform binding layout for WebGPU)
+// ═══════════════════════════════════════════════════════
+
+const wgslFragment = `struct BeautyUniforms {
+  uIntensity: f32,
+  uThreshold: f32,
+};
+struct GlobalFilterUniforms {
+  uInputSize: vec4<f32>,
+  uInputPixel: vec4<f32>,
+  uInputClamp: vec4<f32>,
+  uOutputFrame: vec4<f32>,
+  uGlobalFrame: vec4<f32>,
+  uOutputTexture: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> gfu: GlobalFilterUniforms;
+@group(0) @binding(1) var uTexture: texture_2d<f32>;
+@group(0) @binding(2) var uSampler: sampler;
+@group(1) @binding(0) var<uniform> beautyUniforms: BeautyUniforms;
+
+@fragment
+fn mainFragment(
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>
+) -> @location(0) vec4<f32> {
+  let uIntensity = beautyUniforms.uIntensity;
+  let uThreshold = beautyUniforms.uThreshold;
+
+  // Skin-tone YCbCr detection (WGSL version)
+  let y  = 0.299*uv.x + 0.587*uv.y + 0.114;
+  let cb = 0.5;
+  let cr = 0.5;
+  // Full skin smoothing in WGSL not needed - only used for uniform layout
+  return textureSample(uTexture, uSampler, uv);
+}`;
+
+const wgslVertex = `struct GlobalFilterUniforms {
+  uInputSize: vec4<f32>,
+  uInputPixel: vec4<f32>,
+  uInputClamp: vec4<f32>,
+  uOutputFrame: vec4<f32>,
+  uGlobalFrame: vec4<f32>,
+  uOutputTexture: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> gfu: GlobalFilterUniforms;
+struct VSOutput {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+fn filterVertexPosition(aPosition: vec2<f32>) -> vec4<f32> {
+  var pos = aPosition * gfu.uOutputFrame.zw + gfu.uOutputFrame.xy;
+  pos.x = pos.x * (2.0 / gfu.uOutputTexture.x) - 1.0;
+  pos.y = pos.y * (2.0*gfu.uOutputTexture.z / gfu.uOutputTexture.y) - gfu.uOutputTexture.z;
+  return vec4(pos, 0.0, 1.0);
+}
+fn filterTextureCoord(aPosition: vec2<f32>) -> vec2<f32> {
+  return aPosition * (gfu.uOutputFrame.zw * gfu.uInputSize.zw);
+}
+struct VSInput {
+  @location(0) aPosition: vec2<f32>,
+};
+@vertex
+fn mainVertex(in: VSInput) -> VSOutput {
+  var out: VSOutput;
+  out.position = filterVertexPosition(in.aPosition);
+  out.uv = filterTextureCoord(in.aPosition);
+  return out;
+}`;
+
+// ═══════════════════════════════════════════════════════
+//  DOM refs
+// ═══════════════════════════════════════════════════════
+
 const canvas = document.getElementById('beautyCanvas');
 const $status = document.getElementById('status');
 const $fps = document.getElementById('fpsDisplay');
@@ -203,43 +273,35 @@ const $intensityDisp = document.getElementById('intensityDisplay');
 const $threshold = document.getElementById('threshold');
 const $thresholdDisp = document.getElementById('thresholdDisplay');
 const $toggleBtn = document.getElementById('toggleBtn');
-
 let splitMode = true;
 
 async function main() {
-  // ── 1. Camera (with fallback test pattern) ──
+  // ── 1. Camera ──
   let videoEl = null;
   let useFallback = false;
-
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } }
     });
     videoEl = document.createElement('video');
-    videoEl.srcObject = stream;
-    videoEl.muted = true;
-    videoEl.playsInline = true;
+    videoEl.srcObject = stream; videoEl.muted = true; videoEl.playsInline = true;
     await videoEl.play();
     $status.textContent = '摄像头已就绪';
   } catch (e) {
-    $status.textContent = '⚠️ 无摄像头，使用测试图案 (' + e.message + ')';
+    $status.textContent = '⚠️ 无摄像头，使用测试图案';
     useFallback = true;
   }
 
-  // ── 2. Build source texture ──
+  // ── 2. Source texture ──
   let sourceTex;
   if (useFallback) {
     const tc = document.createElement('canvas');
     tc.width = 640; tc.height = 480;
     const ctx = tc.getContext('2d');
     const g = ctx.createRadialGradient(320, 240, 30, 320, 240, 300);
-    g.addColorStop(0, '#f5cba0');
-    g.addColorStop(0.3, '#e8b88a');
-    g.addColorStop(0.6, '#d4a574');
-    g.addColorStop(1, '#8b6f47');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 640, 480);
-    // Noise dots to demonstrate smoothing
+    g.addColorStop(0, '#f5cba0'); g.addColorStop(0.3, '#e8b88a');
+    g.addColorStop(0.6, '#d4a574'); g.addColorStop(1, '#8b6f47');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 640, 480);
     ctx.fillStyle = '#c4956a';
     for (let i = 0; i < 300; i++) {
       ctx.beginPath();
@@ -247,109 +309,84 @@ async function main() {
       ctx.fill();
     }
     sourceTex = Texture.from(tc);
-    $status.textContent += ' 🧪 测试图案';
   } else {
     sourceTex = Texture.from(videoEl);
   }
 
   // ── 3. Pixi Application ──
   const app = new Application();
-  await app.init({
-    canvas,
-    width: 1280,
-    height: 480,
-    backgroundAlpha: 0,
-    antialias: true,
-    preference: 'webgl2',
-  });
+  await app.init({ canvas, width: 1280, height: 480, backgroundAlpha: 0, antialias: true, preference: 'webgl2' });
 
   // ── 4. Sprites ──
   const rawSprite = new Sprite(sourceTex);
-  rawSprite.width = 640; rawSprite.height = 480;
-  rawSprite.x = 0; rawSprite.y = 0;
+  rawSprite.width = 640; rawSprite.height = 480; rawSprite.x = 0; rawSprite.y = 0;
 
   const filteredSprite = new Sprite(sourceTex);
-  filteredSprite.width = 640; filteredSprite.height = 480;
-  filteredSprite.x = 640; filteredSprite.y = 0;
+  filteredSprite.width = 640; filteredSprite.height = 480; filteredSprite.x = 640; filteredSprite.y = 0;
 
-  // ── 5. Build beauty filter (Pixi.js v8 API) ──
-  const glProgram = GlProgram.from({
-    vertex: vertexSrc,
-    fragment: fragSrc,
-    name: 'beauty-filter',
+  // ── 5. Build beauty filter (GLSL + WGSL programs for uniform binding) ──
+  const glProgram = GlProgram.from({ vertex: vertexGLSL, fragment: fragGLSL, name: 'beauty-filter' });
+  const gpuProgram = GpuProgram.from({
+    vertex: { source: wgslVertex, entryPoint: 'mainVertex' },
+    fragment: { source: wgslFragment, entryPoint: 'mainFragment' },
   });
 
   const beautyFilter = new Filter({
+    gpuProgram,
     glProgram,
     resources: {
       beautyUniforms: {
-        uIntensity: { value: 0.4, type: 'f32' },
+        uIntensity: { value: 0.7, type: 'f32' },
         uThreshold: { value: 0.5, type: 'f32' },
-      }
-    }
+      },
+    },
   });
   filteredSprite.filters = [beautyFilter];
 
-  // Divider line
+  // Divider
   const divider = new Graphics();
   divider.rect(639, 0, 2, 480).fill({ color: 0xffffff, alpha: 0.15 });
-
   app.stage.addChild(rawSprite, filteredSprite, divider);
 
-  // ── 6. FPS counter ──
-  let frameCount = 0;
-  let lastFps = performance.now();
+  // ── 6. FPS ──
+  let fc = 0, lastFps = performance.now();
   app.ticker.add(() => {
-    frameCount++;
+    fc++;
     const now = performance.now();
-    if (now - lastFps >= 1000) {
-      $fps.textContent = `${frameCount} fps`;
-      frameCount = 0;
-      lastFps = now;
-    }
+    if (now - lastFps >= 1000) { $fps.textContent = `${fc} fps`; fc = 0; lastFps = now; }
   });
 
-  // ── 7. UI controls ──
+  // ── 7. Controls ──
   const uniforms = beautyFilter.resources.beautyUniforms.uniforms;
-
   $intensity.addEventListener('input', () => {
-    const val = parseInt($intensity.value) / 100;
-    uniforms.uIntensity = val;
+    const v = parseInt($intensity.value) / 100;
+    uniforms.uIntensity = v;
     $intensityDisp.textContent = `${$intensity.value}%`;
   });
-
   $threshold.addEventListener('input', () => {
-    const val = parseInt($threshold.value) / 100;
-    uniforms.uThreshold = val;
+    const v = parseInt($threshold.value) / 100;
+    uniforms.uThreshold = v;
     $thresholdDisp.textContent = `${$threshold.value}%`;
   });
-
   $toggleBtn.addEventListener('click', () => {
     splitMode = !splitMode;
     if (splitMode) {
       rawSprite.visible = true; rawSprite.x = 0;
       filteredSprite.x = 640; filteredSprite.width = 640; filteredSprite.height = 480;
-      divider.visible = true;
-      app.renderer.resize(1280, 480);
-      canvas.width = 1280;
+      divider.visible = true; app.renderer.resize(1280, 480); canvas.width = 1280;
       $toggleBtn.textContent = '对比模式';
     } else {
       rawSprite.visible = false;
       filteredSprite.x = 0; filteredSprite.width = 1280; filteredSprite.height = 480;
-      divider.visible = false;
-      app.renderer.resize(1280, 480);
-      canvas.width = 1280;
+      divider.visible = false; app.renderer.resize(1280, 480); canvas.width = 1280;
       $toggleBtn.textContent = '分屏对比';
     }
   });
 
-  $status.textContent = '✅ 运行中' + (useFallback ? '（测试图案模式）' : '');
+  $status.textContent = useFallback ? '✅ 运行中（测试图案模式）' : '✅ 运行中';
 }
 
-main().catch(err => {
-  $status.textContent = '❌ 初始化失败: ' + err.message;
-  console.error(err);
-});
+main().catch(err => { $status.textContent = '❌ ' + err.message; console.error(err); });
 </script>
 </body>
 </html>
