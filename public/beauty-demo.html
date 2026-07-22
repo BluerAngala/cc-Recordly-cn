@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beauty Filter Demo - Recordly</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0f; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh; overflow: hidden;
+  }
+  h1 {
+    font-size: 20px; font-weight: 600; letter-spacing: -0.01em;
+    margin: 20px 0 2px; background: linear-gradient(135deg, #f472b6, #8b5cf6);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .subtitle { font-size: 13px; color: rgba(255,255,255,0.4); margin-bottom: 16px; }
+  #canvas-container { position: relative; border-radius: 16px; overflow: hidden; box-shadow: 0 0 60px rgba(139,92,246,0.15); }
+  #beautyCanvas { display: block; }
+
+  .controls {
+    margin-top: 16px; display: flex; align-items: center; gap: 24px;
+    padding: 12px 24px; background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 14px;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  }
+  .control-group { display: flex; align-items: center; gap: 10px; }
+  .control-group label { font-size: 13px; color: rgba(255,255,255,0.6); white-space: nowrap; font-weight: 500; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 120px; height: 4px;
+    background: rgba(139,92,246,0.3); border-radius: 2px; outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px;
+    background: linear-gradient(135deg, #a78bfa, #7c3aed); border-radius: 50%; cursor: pointer;
+    box-shadow: 0 0 12px rgba(139,92,246,0.4);
+  }
+  .badge { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px; background: rgba(139,92,246,0.15); color: #a78bfa; }
+  .split-indicator {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 0; color: rgba(255,255,255,0.3); font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+    background: rgba(0,0,0,0.5); padding: 4px 14px; border-radius: 20px; backdrop-filter: blur(4px);
+  }
+  .split-indicator span:first-child { color: rgba(255,255,255,0.7); }
+  .split-indicator span { padding: 0 10px; }
+  .fps { position: absolute; top: 12px; right: 12px; font-size: 11px; color: rgba(255,255,255,0.25); font-family: monospace; background: rgba(0,0,0,0.4); padding: 3px 8px; border-radius: 6px; }
+  .status { font-size: 12px; color: rgba(255,255,255,0.3); margin-top: 12px; }
+  .note { font-size: 12px; color: rgba(255,255,255,0.2); margin-top: 6px; max-width: 600px; text-align: center; line-height: 1.5; }
+  .key { display: inline-block; padding: 1px 6px; background: rgba(255,255,255,0.06); border-radius: 4px; font-family: monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>Beauty Filter Demo</h1>
+<p class="subtitle">Real-time skin smoothing &middot; Pixi.js + GLSL ES 3.0</p>
+
+<div id="canvas-container">
+  <div class="split-indicator"><span>Raw</span><span style="color:rgba(255,255,255,0.15);">|</span><span style="color:rgba(139,92,246,0.7);">Filtered</span></div>
+  <div class="fps" id="fpsDisplay">-- fps</div>
+  <canvas id="beautyCanvas" width="1280" height="480"></canvas>
+</div>
+
+<div class="controls">
+  <div class="control-group">
+    <label for="intensity">磨皮</label>
+    <input type="range" id="intensity" min="0" max="100" value="40">
+    <span class="badge" id="intensityDisplay">40%</span>
+  </div>
+  <div class="control-group">
+    <label for="threshold">肤感</label>
+    <input type="range" id="threshold" min="0" max="100" value="50">
+    <span class="badge" id="thresholdDisplay">50%</span>
+  </div>
+  <div class="control-group">
+    <button id="toggleBtn" style="
+      background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.3);
+      color: #a78bfa; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500;
+    ">对比模式</button>
+  </div>
+</div>
+<p class="status" id="status">正在启动摄像头...</p>
+<p class="note">在 <span class="key">WebGL2</span> 中实时执行基于 YCbCr 肤色检测的选择性磨皮（GLSL ES 3.0）。滑块调节强度与肤色检测宽容度。</p>
+
+<script type="importmap">
+{
+  "imports": {
+    "pixi.js": "https://cdn.jsdelivr.net/npm/pixi.js@8.14.0/dist/pixi.min.mjs"
+  }
+}
+</script>
+
+<script type="module">
+import { Application, Sprite, Texture, Filter, Graphics, GlProgram, UniformGroup } from 'pixi.js';
+
+// ── Default vertex shader (from pixi-filters default2.mjs) ──
+const vertexSrc = `in vec2 aPosition;
+out vec2 vTextureCoord;
+
+uniform vec4 uInputSize;
+uniform vec4 uOutputFrame;
+uniform vec4 uOutputTexture;
+
+vec4 filterVertexPosition( void )
+{
+    vec2 position = aPosition * uOutputFrame.zw + uOutputFrame.xy;
+
+    position.x = position.x * (2.0 / uOutputTexture.x) - 1.0;
+    position.y = position.y * (2.0*uOutputTexture.z / uOutputTexture.y) - uOutputTexture.z;
+
+    return vec4(position, 0.0, 1.0);
+}
+
+vec2 filterTextureCoord( void )
+{
+    return aPosition * (uOutputFrame.zw * uInputSize.zw);
+}
+
+void main(void)
+{
+    gl_Position = filterVertexPosition();
+    vTextureCoord = filterTextureCoord();
+}
+`;
+
+// ── Fragment shader: skin-aware beauty filter (GLSL ES 3.0) ──
+const fragSrc = `in vec2 vTextureCoord;
+out vec4 finalColor;
+
+uniform sampler2D uTexture;
+uniform float uIntensity;
+uniform float uThreshold;
+
+vec3 rgb2ycbcr(vec3 c) {
+    float y  = 0.299   * c.r + 0.587   * c.g + 0.114   * c.b;
+    float cb = 128.0   - 0.168736 * c.r - 0.331264 * c.g + 0.5     * c.b;
+    float cr = 128.0   + 0.5     * c.r - 0.418688 * c.g - 0.081312 * c.b;
+    return vec3(y, cb, cr);
+}
+
+float skinWeight(vec3 rgb) {
+    vec3 ycc = rgb2ycbcr(rgb);
+    float cb = ycc.g;
+    float cr = ycc.b;
+    float cbRef = 110.0;
+    float crRef = 155.0;
+    float tol = mix(60.0, 5.0, uThreshold);
+    float w = 1.0 - smoothstep(0.0, tol, distance(vec2(cb, cr), vec2(cbRef, crRef)));
+    float y = ycc.r;
+    float lumMask = smoothstep(20.0, 50.0, y) * (1.0 - smoothstep(200.0, 235.0, y));
+    return w * lumMask;
+}
+
+void main() {
+    vec2 uv = vTextureCoord;
+    vec2 texel = 1.0 / vec2(textureSize(uTexture, 0));
+
+    vec4 orig = texture(uTexture, uv);
+    float skin = skinWeight(orig.rgb);
+
+    // 3x3 Gaussian blur
+    vec3 blurAcc = vec3(0.0);
+    float blurW = 0.0;
+    float k[9];
+    k[0] = 0.0625; k[1] = 0.125; k[2] = 0.0625;
+    k[3] = 0.125;  k[4] = 0.25;  k[5] = 0.125;
+    k[6] = 0.0625; k[7] = 0.125; k[8] = 0.0625;
+
+    for (int y = -1; y <= 1; y++) {
+      for (int x = -1; x <= 1; x++) {
+        vec2 off = vec2(float(x), float(y)) * texel * 2.0;
+        vec3 samp = texture(uTexture, uv + off).rgb;
+        int idx = (y+1)*3 + (x+1);
+        float w = k[idx];
+        blurAcc += samp * w;
+        blurW += w;
+      }
+    }
+    vec3 blurred = blurAcc / blurW;
+
+    float blend = skin * uIntensity;
+    vec3 result = mix(orig.rgb, blurred, blend);
+
+    finalColor = vec4(result, orig.a);
+}
+`;
+
+// ── DOM refs ──
+const canvas = document.getElementById('beautyCanvas');
+const $status = document.getElementById('status');
+const $fps = document.getElementById('fpsDisplay');
+const $intensity = document.getElementById('intensity');
+const $intensityDisp = document.getElementById('intensityDisplay');
+const $threshold = document.getElementById('threshold');
+const $thresholdDisp = document.getElementById('thresholdDisplay');
+const $toggleBtn = document.getElementById('toggleBtn');
+
+let splitMode = true;
+
+async function main() {
+  // ── 1. Camera (with fallback test pattern) ──
+  let videoEl = null;
+  let useFallback = false;
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } }
+    });
+    videoEl = document.createElement('video');
+    videoEl.srcObject = stream;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    await videoEl.play();
+    $status.textContent = '摄像头已就绪';
+  } catch (e) {
+    $status.textContent = '⚠️ 无摄像头，使用测试图案 (' + e.message + ')';
+    useFallback = true;
+  }
+
+  // ── 2. Build source texture ──
+  let sourceTex;
+  if (useFallback) {
+    const tc = document.createElement('canvas');
+    tc.width = 640; tc.height = 480;
+    const ctx = tc.getContext('2d');
+    const g = ctx.createRadialGradient(320, 240, 30, 320, 240, 300);
+    g.addColorStop(0, '#f5cba0');
+    g.addColorStop(0.3, '#e8b88a');
+    g.addColorStop(0.6, '#d4a574');
+    g.addColorStop(1, '#8b6f47');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 640, 480);
+    // Noise dots to demonstrate smoothing
+    ctx.fillStyle = '#c4956a';
+    for (let i = 0; i < 300; i++) {
+      ctx.beginPath();
+      ctx.arc(Math.random() * 640, Math.random() * 480, Math.random() * 3 + 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    sourceTex = Texture.from(tc);
+    $status.textContent += ' 🧪 测试图案';
+  } else {
+    sourceTex = Texture.from(videoEl);
+  }
+
+  // ── 3. Pixi Application ──
+  const app = new Application();
+  await app.init({
+    canvas,
+    width: 1280,
+    height: 480,
+    backgroundAlpha: 0,
+    antialias: true,
+    preference: 'webgl2',
+  });
+
+  // ── 4. Sprites ──
+  const rawSprite = new Sprite(sourceTex);
+  rawSprite.width = 640; rawSprite.height = 480;
+  rawSprite.x = 0; rawSprite.y = 0;
+
+  const filteredSprite = new Sprite(sourceTex);
+  filteredSprite.width = 640; filteredSprite.height = 480;
+  filteredSprite.x = 640; filteredSprite.y = 0;
+
+  // ── 5. Build beauty filter (Pixi.js v8 API) ──
+  const glProgram = GlProgram.from({
+    vertex: vertexSrc,
+    fragment: fragSrc,
+    name: 'beauty-filter',
+  });
+
+  const beautyFilter = new Filter({
+    glProgram,
+    resources: {
+      beautyUniforms: {
+        uIntensity: { value: 0.4, type: 'f32' },
+        uThreshold: { value: 0.5, type: 'f32' },
+      }
+    }
+  });
+  filteredSprite.filters = [beautyFilter];
+
+  // Divider line
+  const divider = new Graphics();
+  divider.rect(639, 0, 2, 480).fill({ color: 0xffffff, alpha: 0.15 });
+
+  app.stage.addChild(rawSprite, filteredSprite, divider);
+
+  // ── 6. FPS counter ──
+  let frameCount = 0;
+  let lastFps = performance.now();
+  app.ticker.add(() => {
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFps >= 1000) {
+      $fps.textContent = `${frameCount} fps`;
+      frameCount = 0;
+      lastFps = now;
+    }
+  });
+
+  // ── 7. UI controls ──
+  const uniforms = beautyFilter.resources.beautyUniforms.uniforms;
+
+  $intensity.addEventListener('input', () => {
+    const val = parseInt($intensity.value) / 100;
+    uniforms.uIntensity = val;
+    $intensityDisp.textContent = `${$intensity.value}%`;
+  });
+
+  $threshold.addEventListener('input', () => {
+    const val = parseInt($threshold.value) / 100;
+    uniforms.uThreshold = val;
+    $thresholdDisp.textContent = `${$threshold.value}%`;
+  });
+
+  $toggleBtn.addEventListener('click', () => {
+    splitMode = !splitMode;
+    if (splitMode) {
+      rawSprite.visible = true; rawSprite.x = 0;
+      filteredSprite.x = 640; filteredSprite.width = 640; filteredSprite.height = 480;
+      divider.visible = true;
+      app.renderer.resize(1280, 480);
+      canvas.width = 1280;
+      $toggleBtn.textContent = '对比模式';
+    } else {
+      rawSprite.visible = false;
+      filteredSprite.x = 0; filteredSprite.width = 1280; filteredSprite.height = 480;
+      divider.visible = false;
+      app.renderer.resize(1280, 480);
+      canvas.width = 1280;
+      $toggleBtn.textContent = '分屏对比';
+    }
+  });
+
+  $status.textContent = '✅ 运行中' + (useFallback ? '（测试图案模式）' : '');
+}
+
+main().catch(err => {
+  $status.textContent = '❌ 初始化失败: ' + err.message;
+  console.error(err);
+});
+</script>
+</body>
+</html>
