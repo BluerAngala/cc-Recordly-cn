@@ -124,7 +124,8 @@ void main(void)
 `;
 
 // ── Fragment shader: skin-aware beauty filter (GLSL ES 3.0) ──
-const fragSrc = `in vec2 vTextureCoord;
+const fragSrc = `precision highp float;
+in vec2 vTextureCoord;
 out vec4 finalColor;
 
 uniform sampler2D uTexture;
