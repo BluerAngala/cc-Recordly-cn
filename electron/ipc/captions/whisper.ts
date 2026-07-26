@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { get as httpsGet } from "node:https";
 import path from "node:path";
 import { app, type WebContents } from "electron";
-import { getModelById, getModelFilePath, getModelStorageDir } from "./models";
+import { getBundledModelDir, getModelById, getModelStorageDir } from "./models";
 
 // ─── IPC Event Helpers ──────────────────────────────────────────────────
 
@@ -17,6 +17,8 @@ export interface ModelDownloadProgressPayload {
 	path?: string | null;
 	error?: string;
 }
+
+const inFlightModelDownloads = new Map<string, Promise<string>>();
 
 /**
  * Send model download progress to the renderer.
@@ -31,6 +33,23 @@ export function sendModelDownloadProgress(
 
 // ─── Model Status ───────────────────────────────────────────────────────
 
+async function isCompleteModelAt(
+	primaryPath: string,
+	auxiliaryFiles: Array<{ fileName: string }> | undefined,
+): Promise<boolean> {
+	try {
+		await fs.access(primaryPath, fsConstants.R_OK);
+		await Promise.all(
+			(auxiliaryFiles ?? []).map((aux) =>
+				fs.access(path.join(path.dirname(primaryPath), aux.fileName), fsConstants.R_OK),
+			),
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export async function getModelStatus(modelId: string): Promise<{
 	success: boolean;
 	exists: boolean;
@@ -39,17 +58,18 @@ export async function getModelStatus(modelId: string): Promise<{
 	const model = getModelById(modelId);
 	if (!model) return { success: false, exists: false };
 
-	// getModelFilePath checks bundled path first, then user-data download
-	const filePath = getModelFilePath(model, app.getPath("userData"));
-	try {
-		await fs.access(filePath, fsConstants.R_OK);
-		return { success: true, exists: true, path: filePath };
-	} catch {
-		return { success: true, exists: false, path: null };
+	const userDataPath = app.getPath("userData");
+	const candidates = [
+		path.join(getBundledModelDir(model), model.fileName),
+		path.join(getModelStorageDir(model, userDataPath), model.fileName),
+	];
+	for (const filePath of new Set(candidates)) {
+		if (await isCompleteModelAt(filePath, model.auxiliaryFiles)) {
+			return { success: true, exists: true, path: filePath };
+		}
 	}
+	return { success: true, exists: false, path: null };
 }
-
-
 
 // ─── File Download ──────────────────────────────────────────────────────
 
@@ -70,7 +90,8 @@ export function downloadFileWithProgress(
 
 				if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
 					response.resume();
-					return request(response.headers.location, redirectCount + 1).then(resolve, reject);
+					const nextUrl = new URL(response.headers.location, currentUrl).toString();
+					return request(nextUrl, redirectCount + 1).then(resolve, reject);
 				}
 
 				if (statusCode !== 200) {
@@ -126,17 +147,14 @@ export function downloadFileWithProgress(
  * Download a model (and its auxiliary files) by model ID.
  * Reports progress via IPC to the renderer.
  */
-export async function downloadModel(
-	webContents: WebContents,
-	modelId: string,
-): Promise<string> {
+async function performModelDownload(webContents: WebContents, modelId: string): Promise<string> {
 	const model = getModelById(modelId);
 	if (!model) throw new Error(`Unknown model: ${modelId}`);
 
 	const storageDir = getModelStorageDir(model, app.getPath("userData"));
 	await fs.mkdir(storageDir, { recursive: true });
 
-	const primaryPath = getModelFilePath(model, app.getPath("userData"));
+	const primaryPath = path.join(storageDir, model.fileName);
 	const tempPath = `${primaryPath}.download`;
 
 	sendModelDownloadProgress(webContents, {
@@ -165,13 +183,20 @@ export async function downloadModel(
 		if (model.auxiliaryFiles) {
 			for (const aux of model.auxiliaryFiles) {
 				const auxPath = path.join(storageDir, aux.fileName);
+				const tempAuxPath = `${auxPath}.download`;
 				try {
 					await fs.access(auxPath, fsConstants.R_OK);
 					continue; // Already exists
 				} catch {
-					await downloadFileWithProgress(aux.url, auxPath, () => undefined);
+					await fs.rm(tempAuxPath, { force: true }).catch(() => undefined);
+					try {
+						await downloadFileWithProgress(aux.url, tempAuxPath, () => undefined);
+						await fs.rename(tempAuxPath, auxPath);
+					} catch (error) {
+						await fs.rm(tempAuxPath, { force: true }).catch(() => undefined);
+						throw error;
+					}
 				}
-				await downloadFileWithProgress(aux.url, auxPath, () => {});
 			}
 		}
 
@@ -195,6 +220,48 @@ export async function downloadModel(
 	}
 }
 
+export function downloadModel(webContents: WebContents, modelId: string): Promise<string> {
+	const inFlight = inFlightModelDownloads.get(modelId);
+	if (inFlight) {
+		sendModelDownloadProgress(webContents, {
+			modelId,
+			status: "downloading",
+			progress: 0,
+			path: null,
+		});
+		return inFlight.then(
+			(modelPath) => {
+				sendModelDownloadProgress(webContents, {
+					modelId,
+					status: "downloaded",
+					progress: 100,
+					path: modelPath,
+				});
+				return modelPath;
+			},
+			(error) => {
+				sendModelDownloadProgress(webContents, {
+					modelId,
+					status: "error",
+					progress: 0,
+					path: null,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			},
+		);
+	}
+
+	const download = performModelDownload(webContents, modelId);
+	const trackedDownload = download.finally(() => {
+		if (inFlightModelDownloads.get(modelId) === trackedDownload) {
+			inFlightModelDownloads.delete(modelId);
+		}
+	});
+	inFlightModelDownloads.set(modelId, trackedDownload);
+	return trackedDownload;
+}
+
 // ─── Model Deletion ─────────────────────────────────────────────────────
 
 /**
@@ -207,5 +274,3 @@ export async function deleteModel(modelId: string): Promise<void> {
 	const storageDir = getModelStorageDir(model, app.getPath("userData"));
 	await fs.rm(storageDir, { recursive: true, force: true });
 }
-
-

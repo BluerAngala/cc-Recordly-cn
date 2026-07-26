@@ -1,11 +1,20 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as sherpa from "sherpa-onnx";
-import type { CaptionEngine, CaptionCuePayload, GenerateCaptionOptions, GenerateCaptionResult } from "./engine";
+import type {
+	CaptionEngine,
+	CaptionCuePayload,
+	GenerateCaptionOptions,
+	GenerateCaptionResult,
+} from "./engine";
 
 function mapLanguage(language: string): string {
 	switch (language) {
-		case "zh": case "yue": case "ja": case "ko": case "en":
+		case "zh":
+		case "yue":
+		case "ja":
+		case "ko":
+		case "en":
 			return language;
 		default:
 			return "auto";
@@ -16,12 +25,16 @@ function mapLanguage(language: string): string {
  * Merge BPE subword tokens into readable words with timing spans.
  * Returns [{text, startMs, endMs}, ...] for use by the existing phrase segmenter.
  */
-function tokensToWords(tokens: string[], timestamps: number[]): Array<{ text: string; startMs: number; endMs: number }> {
+export function tokensToWords(
+	tokens: string[],
+	timestamps: number[],
+): Array<{ text: string; startMs: number; endMs: number }> {
 	if (tokens.length === 0 || timestamps.length === 0) return [];
 
 	const words: Array<{ text: string; startMs: number; endMs: number }> = [];
 	let buffer = "";
 	let startMs = Math.round(timestamps[0] * 1000);
+	let lastTokenMs = startMs;
 
 	for (let i = 0; i < tokens.length; i++) {
 		const tok = tokens[i];
@@ -34,21 +47,21 @@ function tokensToWords(tokens: string[], timestamps: number[]): Array<{ text: st
 			!/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(tok) &&
 			!/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(buffer.slice(-1));
 
-		if (isSubword) {
-			buffer += tok;
+		if (!buffer) {
+			buffer = tok.startsWith(" ") ? tok.slice(1) : tok;
+			startMs = tsMs;
+			lastTokenMs = tsMs;
 			continue;
 		}
 
-		// Compute endMs as midpoint between this word's start and the next token's start.
-		// This creates real gaps the segmenter can use.
-		const nextTsMs =
-			i + 1 < tokens.length ? Math.round(timestamps[i + 1] * 1000) : tsMs + 200;
-		const endMs = Math.round((tsMs + nextTsMs) / 2);
-
-		// Finalize previous word
-		if (buffer) {
-			words.push({ text: buffer, startMs, endMs });
+		if (isSubword) {
+			buffer += tok;
+			lastTokenMs = tsMs;
+			continue;
 		}
+
+		const endMs = Math.round((lastTokenMs + tsMs) / 2);
+		words.push({ text: buffer, startMs, endMs });
 
 		// Start new word
 		if (tok.startsWith(" ")) {
@@ -56,13 +69,13 @@ function tokensToWords(tokens: string[], timestamps: number[]): Array<{ text: st
 		} else {
 			buffer = tok;
 		}
-		startMs = endMs;
+		startMs = tsMs;
+		lastTokenMs = tsMs;
 	}
 
 	// Finalize last word
 	if (buffer) {
-		const lastTs = Math.round(timestamps[tokens.length - 1] * 1000);
-		words.push({ text: buffer, startMs, endMs: lastTs + 200 });
+		words.push({ text: buffer, startMs, endMs: lastTokenMs + 200 });
 	}
 
 	return words;
@@ -102,27 +115,29 @@ export class SenseVoiceEngine implements CaptionEngine {
 			decodingMethod: "greedy_search",
 		});
 
-		const wave = sherpa.readWave(audioPath);
-
 		let resultText = "";
 		let resultTokens: string[] = [];
 		let resultTimestamps: number[] = [];
 		let recognizerError: string | null = null;
 
-		const stream = recognizer.createStream();
 		try {
-			stream.acceptWaveform(wave.sampleRate, wave.samples);
-			recognizer.decode(stream);
-			const raw = recognizer.getResult(stream) as Record<string, unknown>;
-			resultText = (raw.text as string) ?? "";
-			resultTokens = (raw.tokens as string[]) ?? [];
-			resultTimestamps = (raw.timestamps as number[]) ?? [];
-		} catch (error) {
-			recognizerError = error instanceof Error ? error.message : String(error);
+			const wave = sherpa.readWave(audioPath);
+			const stream = recognizer.createStream();
+			try {
+				stream.acceptWaveform(wave.sampleRate, wave.samples);
+				recognizer.decode(stream);
+				const raw = recognizer.getResult(stream) as Record<string, unknown>;
+				resultText = (raw.text as string) ?? "";
+				resultTokens = (raw.tokens as string[]) ?? [];
+				resultTimestamps = (raw.timestamps as number[]) ?? [];
+			} catch (error) {
+				recognizerError = error instanceof Error ? error.message : String(error);
+			} finally {
+				stream.free();
+			}
 		} finally {
-			stream.free();
+			recognizer.free();
 		}
-		recognizer.free();
 
 		if (recognizerError) {
 			return { success: false, cues: [], error: `SenseVoice: ${recognizerError}` };
@@ -150,7 +165,10 @@ export class SenseVoiceEngine implements CaptionEngine {
 				const w = words[i];
 				const gapToPrev = i > 0 ? w.startMs - words[i - 1].endMs : 0;
 
-				if (segText.length > 0 && (gapToPrev >= 1000 || segText.length + w.text.length > 15)) {
+				if (
+					segText.length > 0 &&
+					(gapToPrev >= 1000 || segText.length + w.text.length > 15)
+				) {
 					let t = segText.trim();
 					cues.push({
 						id: `cue-${cues.length}`,
