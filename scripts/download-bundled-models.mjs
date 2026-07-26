@@ -13,7 +13,7 @@
  */
 
 import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { get as httpsGet } from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,12 +129,7 @@ async function main() {
 			const tempDest = `${dest}.download`;
 			try {
 				await downloadFile(file.url, tempDest);
-				// Rename temp -> final
-				await rm(tempDest, { force: true });
-				await writeFile(tempDest, ""); // touch
-				await rm(tempDest);
-				// Re-download to proper path
-				await downloadFile(file.url, dest);
+				await rename(tempDest, dest);
 			} catch (error) {
 				await rm(tempDest, { force: true }).catch(() => undefined);
 				console.error(`    FAILED: ${file.fileName} - ${error.message}`);

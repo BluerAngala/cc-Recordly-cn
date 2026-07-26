@@ -580,6 +580,8 @@ export default function VideoEditor() {
 	const [selectedModelId, setSelectedModelId] = useState<string>(
 		initialEditorPreferences.selectedModelId ?? "sensevoice-small",
 	);
+	const selectedModelIdRef = useRef(selectedModelId);
+	selectedModelIdRef.current = selectedModelId;
 	const [availableModels, setAvailableModels] = useState<
 		Array<{
 			id: string;
@@ -2762,7 +2764,7 @@ export default function VideoEditor() {
 					[state.modelId]: { exists: true, path: state.path },
 				}));
 				// If this is the selected model, also update whisperModelPath
-				if (state.modelId === selectedModelId) {
+				if (state.modelId === selectedModelIdRef.current) {
 					setWhisperModelPath(state.path);
 				}
 			}
@@ -2796,7 +2798,11 @@ export default function VideoEditor() {
 							...prev,
 							[model.id]: { exists: result.exists, path: result.path },
 						}));
-						if (result.exists && result.path && model.id === selectedModelId) {
+						if (
+							result.exists &&
+							result.path &&
+							model.id === selectedModelIdRef.current
+						) {
 							setWhisperModelPath(result.path);
 						}
 					}
@@ -2864,11 +2870,11 @@ export default function VideoEditor() {
 			setModelStatuses((prev) => ({
 				...prev,
 				[modelId]: { exists: false, path: null },
-				}));
+			}));
 			setModelDownloadProgress((prev) => ({
 				...prev,
 				[modelId]: { status: "idle", progress: 0 },
-				}));
+			}));
 			// If deleted model was selected, clear whisperModelPath
 			if (modelId === selectedModelId) {
 				setWhisperModelPath(null);
@@ -2935,7 +2941,7 @@ export default function VideoEditor() {
 		await syncActiveVideoSource(sourcePath, webcam.sourcePath ?? null);
 
 		if (!whisperModelPath) {
-			toast.error("Select a Whisper model or download the model first");
+			toast.error("Select a caption model or download it first");
 			return;
 		}
 
@@ -2977,6 +2983,7 @@ export default function VideoEditor() {
 		videoSourcePath,
 		whisperExecutablePath,
 		whisperModelPath,
+		selectedModelId,
 	]);
 
 	const handleClearAutoCaptions = useCallback(() => {

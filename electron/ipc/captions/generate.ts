@@ -209,31 +209,35 @@ export async function generateAutoCaptionsFromVideo(options: {
 			const engine = new SenseVoiceEngine();
 			const ffmpegPath = getFfmpegBinaryPath();
 			const tempDir = app.getPath("temp");
-			const wavPath = path.join(tempDir, `sensevoice-${Date.now()}.wav`);
-
-			// Use the same audio extraction as whisper path
-			const audioSource = await extractCaptionAudioSource({
-				videoPath: options.videoPath,
-				ffmpegPath,
-				wavPath,
-			});
-
-			const result = await engine.generate({
-				audioPath: wavPath,
-				modelPath: options.whisperModelPath,
-				model,
-				language: options.language,
+			const wavPath = path.join(
 				tempDir,
-			});
+				`sensevoice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`,
+			);
 
-			if (!result.success) {
+			try {
+				// Use the same audio extraction as whisper path
+				const audioSource = await extractCaptionAudioSource({
+					videoPath: options.videoPath,
+					ffmpegPath,
+					wavPath,
+				});
+
+				const result = await engine.generate({
+					audioPath: wavPath,
+					modelPath: options.whisperModelPath,
+					model,
+					language: options.language,
+					tempDir,
+				});
+
+				if (!result.success) {
+					throw new Error(result.error || "SenseVoice caption generation failed.");
+				}
+
+				return { success: true, cues: result.cues, audioSourceLabel: audioSource.label };
+			} finally {
 				await fs.rm(wavPath, { force: true }).catch(() => undefined);
-				throw new Error(result.error || "SenseVoice caption generation failed.");
 			}
-
-			await fs.rm(wavPath, { force: true }).catch(() => undefined);
-
-			return { success: true, cues: result.cues, audioSourceLabel: audioSource.label };
 		}
 	}
 

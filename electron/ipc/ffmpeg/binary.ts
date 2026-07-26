@@ -120,7 +120,7 @@ export function getFfmpegBinaryPath(): string {
 	const ffmpegStatic = loadFfmpegStatic();
 	if (ffmpegStatic && typeof ffmpegStatic === "string") {
 		const bundledPath = app.isPackaged
-			? ffmpegStatic.replace(/\.asar([\/\\])/, ".asar.unpacked$1")
+			? ffmpegStatic.replace(/\.asar([/\\])/, ".asar.unpacked$1")
 			: ffmpegStatic;
 
 		if (existsSync(bundledPath)) {
